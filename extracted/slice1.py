@@ -6,7 +6,7 @@ from tvm.script import tir as T
 
 MODEL_NAME = "vicuna_v1_7b_fp_16"
 FUNC_NAME = "slice1"
-FUNC_HASH = -1903652266317086732
+FUNC_HASH = 8239087473435926337
 WEIGHT = 1
 CAT = -1
 SAMPLE_NUMBER = 5
@@ -16,7 +16,7 @@ input_shape_gen_func = dill.loads(b'\x80\x04\x95\xcd\x14\x00\x00\x00\x00\x00\x00
 
 @T.prim_func
 def main(A: T.Buffer((T.int64(1), T.int64(1), T.int64(4096)), "float16"), slice: T.Buffer((T.int64(1), T.int64(1), T.int64(4096)), "float16")):
-    T.func_attr({"tir.noalias": T.bool(True)})
+    T.func_attr({"op_pattern": 1, "tir.noalias": T.bool(True)})
     # with T.block("root"):
     for i, j, k in T.grid(T.int64(1), T.int64(1), T.int64(4096)):
         with T.block("slice"):

@@ -6,7 +6,7 @@ from tvm.script import tir as T
 
 MODEL_NAME = "vicuna_v1_7b_fp_16"
 FUNC_NAME = "rms_norm1"
-FUNC_HASH = -5322266221196207896
+FUNC_HASH = 2292435488911535817
 WEIGHT = 65
 CAT = -1
 SAMPLE_NUMBER = 5
@@ -16,7 +16,7 @@ input_shape_gen_func = dill.loads(b'\x80\x04\x95\xe4\x18\x00\x00\x00\x00\x00\x00
 
 @T.prim_func
 def main(A: T.Buffer((T.int64(1), T.int64(1), T.int64(4096)), "float16"), B: T.Buffer((T.int64(4096),), "float16"), rms_norm: T.Buffer((T.int64(1), T.int64(1), T.int64(4096)), "float16")):
-    T.func_attr({"tir.noalias": T.bool(True)})
+    T.func_attr({"op_pattern": 4, "tir.noalias": T.bool(True)})
     # with T.block("root"):
     Ared_temp = T.alloc_buffer((T.int64(1), T.int64(1)))
     for bsz, i, k in T.grid(T.int64(1), T.int64(1), T.int64(4096)):

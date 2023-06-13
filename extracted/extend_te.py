@@ -6,7 +6,7 @@ from tvm.script import tir as T
 
 MODEL_NAME = "vicuna_v1_7b_fp_16"
 FUNC_NAME = "extend_te"
-FUNC_HASH = 8401065094409798716
+FUNC_HASH = 2036233013001205556
 WEIGHT = 1
 CAT = -1
 SAMPLE_NUMBER = 5
@@ -16,7 +16,7 @@ input_shape_gen_func = dill.loads(b'\x80\x04\x95s\x16\x00\x00\x00\x00\x00\x00\x8
 
 @T.prim_func
 def main(var_A: T.handle, var_concat_te: T.handle):
-    T.func_attr({"tir.noalias": T.bool(True)})
+    T.func_attr({"op_pattern": 8, "tir.noalias": T.bool(True)})
     n = T.int64()
     A = T.match_buffer(var_A, (T.int64(1), T.int64(1), n, n), "float16")
     m = T.int64()

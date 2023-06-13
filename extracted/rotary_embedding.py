@@ -6,7 +6,7 @@ from tvm.script import tir as T
 
 MODEL_NAME = "vicuna_v1_7b_fp_16"
 FUNC_NAME = "rotary_embedding"
-FUNC_HASH = -90347333085813218
+FUNC_HASH = -8245603449232527969
 WEIGHT = 64
 CAT = -1
 SAMPLE_NUMBER = 5
@@ -16,7 +16,7 @@ input_shape_gen_func = dill.loads(b'\x80\x04\x95\x82$\x00\x00\x00\x00\x00\x00\x8
 
 @T.prim_func
 def main(var_A: T.handle, B: T.Buffer((T.int64(2048), T.int64(128)), "float16"), C: T.Buffer((T.int64(2048), T.int64(128)), "float16"), var_rotary: T.handle, m: T.int64):
-    T.func_attr({"tir.noalias": T.bool(True)})
+    T.func_attr({"op_pattern": 8, "tir.noalias": T.bool(True)})
     n = T.int64()
     A = T.match_buffer(var_A, (T.int64(1), n, T.int64(32), T.int64(128)), "float16")
     rotary = T.match_buffer(var_rotary, (T.int64(1), n, T.int64(32), T.int64(128)), "float16")
