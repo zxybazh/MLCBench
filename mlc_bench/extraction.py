@@ -102,7 +102,7 @@ def extract_func(
     # func.show()
 
 
-def extract_from_relax(mod: tvm.ir.IRModule, model_name: str):
+def extract_from_relax(mod: tvm.ir.IRModule, model_name: str, file_path: str):
     prim_funcs = {}
 
     for gv, func in mod.functions.items():
@@ -138,7 +138,7 @@ def extract_from_relax(mod: tvm.ir.IRModule, model_name: str):
             func_name=func_name,
             func=prim_funcs[gv]["func"],
             func_args=prim_funcs[gv]["args"],
-            file_path=f"extracted/{func_name}.py",
+            file_path=f"{file_path}/{func_name}.py",
         )
 
 
