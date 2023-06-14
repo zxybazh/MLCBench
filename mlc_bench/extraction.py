@@ -142,5 +142,45 @@ def extract_from_relax(mod: tvm.ir.IRModule, model_name: str, file_path: str):
         )
 
 
+def prim_func_usage_gen(mod: tvm.ir.IRModule):
+    for gv, func in mod.functions.items():
+        if isinstance(func, tvm.relax.Function):
+            for block in func.body.blocks:
+                for binding in block.bindings:
+                    if isinstance(binding.value, tvm.relax.expr.Call):
+                        raw_args = binding.value.args
+                        functor = raw_args[0]
+                        if isinstance(functor, tvm.ir.GlobalVar):
+                            if isinstance(mod.functions[functor], tvm.tir.PrimFunc):
+                                args = [arg.struct_info for arg in raw_args[1:]] + [
+                                    binding.value.struct_info
+                                ]
+                                yield gv, functor, args
+
+
+def extract(mod: tvm.ir.IRModule):
+    def update_records(records, new_args):
+        for i, (args, count) in enumerate(records):
+            if new_args == args:
+                records[i] = (args, count + 1)
+                return
+        records.append((new_args, 1))
+
+    prim_func_dict = {}
+    relax_func_dict = {}
+    for gv, functor, args in prim_func_usage_gen(mod):
+        if isinstance(functor, tvm.ir.GlobalVar):
+            if not gv in relax_func_dict:
+                relax_func_dict[gv] = {}
+            if not functor in relax_func_dict[gv]:
+                relax_func_dict[gv][functor] = []
+            if not functor in prim_func_dict:
+                prim_func_dict[functor] = []
+            update_records(prim_func_dict[functor], args)
+            update_records(relax_func_dict[gv][functor], args)
+    print(prim_func_dict)
+    print(relax_func_dict)
+
+
 if __name__ == "__main__":
     raise NotImplementedError
