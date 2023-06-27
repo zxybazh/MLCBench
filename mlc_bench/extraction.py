@@ -1,7 +1,7 @@
 from typing import List, Dict, Union, Tuple, Callable
 from pathlib import Path
 import cloudpickle
-
+import random
 import tvm
 
 SKETCH = """import pickle
@@ -20,38 +20,58 @@ WEIGHT = {weight}
 CAT = {category}
 SAMPLE_NUMBER = {sample_number}
 
-INPUT_SHAPE_GEN_FUNC = pickle.loads({func_dump})
+INPUT_ARGS = pickle.loads({input_args})
+DYM_VAR_SAMPLE_FUNC = pickle.loads({dym_var_sample_func})
+DYM_VAR_DICT = pickle.loads({dym_var_dict})
 
 {func_script}
 
 if __name__ == "__main__":
     bench = MLCBench()
-    target = tvm.target.Target({target})
+    target = tvm.target.Target("{target}")
     dev = {dev}
+    print("Input args:", INPUT_ARGS)
     for _ in range(SAMPLE_NUMBER):
+        dym_var_sample = DYM_VAR_SAMPLE_FUNC(DYM_VAR_DICT)
         input_infos, median, std = bench.benchmark(
-            main, args, dym_var_sample=, target=target, dev=dev, number=10, repeat=10
+            main,
+            INPUT_ARGS,
+            dym_var_sample=dym_var_sample,
+            target=target,
+            dev=dev,
         )
         bench.record(
-        **{
-            "PrimFunc": PRIM_FUNC_NAME,
-            "InputInfo": input_infos,
-            "Time(us)": median*1e6,
-            "Std(us)": std*1e6,
-            "Weight": weight,
-            "WxTime(ms)": weight*median*1e3,
-        })
+            {{
+                "RelaxFunc": RELAX_FUNC_NAME,
+                "PrimFunc": PRIM_FUNC_NAME,
+                "InputInfo": ", ".join(
+                    [f"{{k}} = {{v}}" for k, v in dym_var_sample.items()]
+                ),
+                "Time(us)": median*1e6,
+                "Std(us)": std*1e6,
+                "Weight": WEIGHT,
+                "WxTime(ms)": WEIGHT*median*1e3,
+            }}
+        )
     bench.show()
 """
 
 
-def counted(func: Callable):
-    def wrapped(*args, **kwargs):
-        wrapped.count += 1
-        return func(*args, **kwargs)
+def default_dym_var_sample_func(dym_var_dict: Dict[str, str]) -> Dict[str, int]:
+    """
+    Default dynamic shape variable sample function. Sample a random value for each dynamic shape variable.
 
-    wrapped.count = -1
-    return wrapped
+    {n: "int32", m: "int32"} -> {n: 128, m: 64}
+    """
+    results = {}
+    for var in dym_var_dict:
+        if dym_var_dict[var] == "int32" or "int64":
+            results[var] = random.randint(2, 128)
+        else:
+            raise TypeError(
+                "Unsupported dynamic shape variable type: " + dym_var_dict[var]
+            )
+    return results
 
 
 def extract_shape(
@@ -86,29 +106,32 @@ def prim_func_usage_gen(
 
 def extract_dynamic_var(
     func_dict: Dict,
-) -> Dict[tvm.ir.GlobalVar, Dict[tvm.relax.expr.Call, str]]:
-    dynamic_var_dict = {}
+) -> Dict[tvm.ir.GlobalVar, Dict[str, str]]:
+    dym_var_dict = {}
     for gv in func_dict:
-        dynamic_var_dict[gv] = {}
+        dym_var_dict[gv] = {}
         for functor in func_dict[gv]:
             for arg_list, _ in func_dict[gv][functor]:
                 for arg in arg_list:
                     if isinstance(arg, tvm.relax.TensorStructInfo):
                         for v in arg.shape.values:
                             if isinstance(v, tvm.tir.Var):
-                                dynamic_var_dict[gv][v] = v.dtype
+                                dym_var_dict[gv][str(v)] = v.dtype
                     elif isinstance(arg, tvm.relax.ShapeStructInfo):
                         for v in arg.values:
                             if isinstance(v, tvm.tir.Var):
-                                dynamic_var_dict[gv][v] = v.dtype
+                                dym_var_dict[gv][str(v)] = v.dtype
                     else:
                         raise NotImplementedError
-    return dynamic_var_dict
+    return dym_var_dict
 
 
 def extract_func_info(
     mod: tvm.ir.IRModule,
-) -> Dict[tvm.ir.GlobalVar, Dict[tvm.ir.GlobalVar, List[Tuple[List, int]]]]:
+) -> Tuple[
+    Dict[tvm.ir.GlobalVar, Dict[tvm.ir.GlobalVar, List[Tuple[List, int]]]],
+    Dict[tvm.ir.GlobalVar, Dict[str, str]],
+]:
     """Extract function information from a relax module."""
 
     def update_records(records, new_args):
@@ -126,7 +149,9 @@ def extract_func_info(
             if not functor in relax_func_dict[gv]:
                 relax_func_dict[gv][functor] = []
             update_records(relax_func_dict[gv][functor], args)
-    return relax_func_dict, extract_dynamic_var(relax_func_dict)
+
+    dym_var_dict = extract_dynamic_var(relax_func_dict)
+    return relax_func_dict, dym_var_dict
 
 
 def extract_prim_func(
@@ -135,6 +160,7 @@ def extract_prim_func(
     prim_func_name: str,
     func: tvm.tir.PrimFunc,
     func_args: List[Tuple[tvm.relax.expr.Call, str]],
+    dym_var_dict: Dict[tvm.relax.expr.Call, str],
     weight: int,
     file_path: str,
     category: int = -1,
@@ -162,9 +188,11 @@ def extract_prim_func(
                 "weight": weight,
                 "category": category,
                 "sample_number": sample_number,
-                "func_dump": cloudpickle.dumps(get_shape_gen_func(func_args)),
+                "dym_var_dict": cloudpickle.dumps(dym_var_dict),
+                "input_args": cloudpickle.dumps(func_args),
+                "dym_var_sample_func": cloudpickle.dumps(default_dym_var_sample_func),
                 "func_script": func.script(),
-                "target": tvm.target.Target(target),
+                "target": str(tvm.target.Target(target)),
                 "dev": dev,
             }
         ),
@@ -177,7 +205,7 @@ def get_func_name_from_gv(gv: tvm.ir.GlobalVar) -> str:
 
 
 def extract_from_relax(mod: tvm.ir.IRModule, model_name: str, file_path: str):
-    relax_funcs = extract_func_info(mod)
+    relax_funcs, dym_var_dict = extract_func_info(mod)
     Path(file_path).mkdir(parents=True, exist_ok=True)
     for relax_func_gv in relax_funcs:
         relax_func_name = get_func_name_from_gv(relax_func_gv)
@@ -189,6 +217,7 @@ def extract_from_relax(mod: tvm.ir.IRModule, model_name: str, file_path: str):
                     relax_func_name=relax_func_name,
                     prim_func_name=prim_func_name,
                     func=mod[prim_func_gv],
+                    dym_var_dict=dym_var_dict[relax_func_gv],
                     func_args=func_args,
                     weight=weight,
                     file_path=f"{file_path}/{relax_func_name}_{prim_func_name}.py",

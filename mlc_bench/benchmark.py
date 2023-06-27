@@ -1,54 +1,21 @@
 from typing import Callable, Union, Tuple, List, Dict, Any
 import pandas as pd
-import random
 
 import tvm
 from tvm.ir import IRModule
 from tvm.tir import PrimFunc
 from tvm.meta_schedule.testing.tune_utils import generate_input_data
 
-from .extraction import extract_func_info, get_func_name_from_gv
+from .extraction import (
+    extract_func_info,
+    get_func_name_from_gv,
+    default_dym_var_sample_func,
+)
 
 
 def dataframe_sort_by(df: pd.DataFrame, sort_by: str):
     """Sort a dataframe by a column and reset index."""
     return df.sort_values(sort_by, ascending=False).reset_index().drop("index", axis=1)
-
-
-def dedup(func: Callable, max_fail_count: int = 10):
-    """Deduplicate the output of a function unless it duplicates too many times."""
-
-    def wrapped(*args, **kwargs):
-        factor = func(*args, **kwargs)
-        fail_count = 0
-        while factor in wrapped.used and fail_count < max_fail_count:
-            factor = func(*args, **kwargs)
-            fail_count += 1
-        wrapped.used.append(factor)
-        return factor
-
-    wrapped.used = []
-    return wrapped
-
-
-@dedup
-def default_dym_var_sample_func(
-    dym_var_dict: Dict[tvm.relax.expr.Call, str]
-) -> Dict[tvm.relax.expr.Call, int]:
-    """
-    Default dynamic shape variable sample function. Sample a random value for each dynamic shape variable.
-
-    {n: "int32", m: "int32"} -> {n: 128, m: 64}
-    """
-    results = {}
-    for var in dym_var_dict:
-        if dym_var_dict[var] == "int32" or "int64":
-            results[var] = random.randint(2, 128)
-        else:
-            raise TypeError(
-                "Unsupported dynamic shape variable type: " + dym_var_dict[var]
-            )
-    return results
 
 
 def val_value_str(sample: Dict[tvm.relax.expr.Call, int]) -> str:
@@ -58,7 +25,7 @@ def val_value_str(sample: Dict[tvm.relax.expr.Call, int]) -> str:
 
 def populuate_input_shape(
     input_infos: List[Tuple[tvm.relax.TensorStructInfo]],
-    dym_var_sample: Dict[Union[tvm.relax.expr.Call, str], int],
+    dym_var_sample: Dict[str, int],
 ) -> List[Tuple[Tuple[int], str]]:
     """
     Populate input shapes with dynamic shape variable samples.
@@ -72,24 +39,13 @@ def populuate_input_shape(
         shape = []
         if isinstance(input_info, tvm.relax.struct_info.ShapeStructInfo):
             # scalar input
-            key = input_info.values[0]
-            val = (
-                dym_var_sample[key]
-                if key in dym_var_sample
-                else dym_var_sample[str(key)]
-            )
-            results.append((val, "scalar"))
+            results.append((dym_var_sample[str(input_info.values[0])], "scalar"))
         else:
             for dim in input_info.shape:
                 if isinstance(dim, tvm.tir.IntImm):
                     shape.append(dim.value)
                 else:
-                    val = (
-                        dym_var_sample[dim]
-                        if dim in dym_var_sample
-                        else dym_var_sample[str(dim)]
-                    )
-                    shape.append(val)
+                    shape.append(dym_var_sample[str(dim)])
             results.append((tuple(shape), input_info.dtype))
     return results
 
@@ -173,8 +129,8 @@ class MLCBench:
         relax_func: Union[tvm.ir.GlobalVar, str] = None,
         sample_number: int = 2,
         dym_var_sample_func: Callable[
-            [Dict[Union[tvm.relax.expr.Call, str], str]],
-            Dict[Union[tvm.relax.expr.Call, str], int],
+            [Dict[str, str]],
+            Dict[str, int],
         ] = default_dym_var_sample_func,
         target: Union[str, tvm.target.Target] = "llvm -num-cores=4",
         dev: tvm.runtime.Device = tvm.cpu(),

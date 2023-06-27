@@ -51,3 +51,14 @@ Example benchmarking results for relax func "decoding":
 18       0.210      1      0.000210                               slice  R.Tensor((1, n, 4096), dtype="float16"), R.Ten...
 19      65.011      1      0.065011                                cast  R.Tensor((1, 1, 32000), dtype="float16"), R.Te...
 ```
+
+The extraction api will generate self-contained python files that can be run to benchmark single PrimFunc and generate results as follows:
+```
+Input args: [R.Tensor((1, n, 32, 128), dtype="float16"), R.Tensor((2048, 128), dtype="float16"), R.Tensor((2048, 128), dtype="float16"), R.Shape([m]), R.Tensor((1, n, 32, 128), dtype="float16")]
+  RelaxFunc          PrimFunc         InputInfo    Time(us)    Std(us)  Weight   WxTime(ms)
+0  encoding  rotary_embedding  n = 127, m = 122  23994.0219  13.028786      64  1535.617402
+1  encoding  rotary_embedding   n = 120, m = 95  22053.8554  14.256255      64  1411.446746
+2  encoding  rotary_embedding    n = 93, m = 25  14415.2686   8.448572      64   922.577190
+3  encoding  rotary_embedding    n = 70, m = 42  11995.9622   8.730702      64   767.741581
+4  encoding  rotary_embedding     n = 3, m = 67    566.6246   0.959155      64    36.263974
+```
