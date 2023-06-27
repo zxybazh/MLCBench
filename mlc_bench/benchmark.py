@@ -1,28 +1,27 @@
 from typing import Callable, Union, Tuple, List, Dict, Any
+import pandas as pd
+import random
 
 import tvm
 from tvm.ir import IRModule
 from tvm.tir import PrimFunc
 from tvm.meta_schedule.testing.tune_utils import generate_input_data
 
-import pandas as pd
-import random
-
 from .extraction import extract_func_info, get_func_name_from_gv
 
-COLUMNS = [
-    "Time(us)",
-    #    "Std(us)",
-    "Weight",
-    "WxTime(ms)",
-]
+
+def dataframe_sort_by(df: pd.DataFrame, sort_by: str):
+    """Sort a dataframe by a column and reset index."""
+    return df.sort_values(sort_by, ascending=False).reset_index().drop("index", axis=1)
 
 
-def dedup(func: Callable):
+def dedup(func: Callable, max_fail_count: int = 10):
+    """Deduplicate the output of a function unless it duplicates too many times."""
+
     def wrapped(*args, **kwargs):
         factor = func(*args, **kwargs)
         fail_count = 0
-        while factor in wrapped.used and fail_count < 10:
+        while factor in wrapped.used and fail_count < max_fail_count:
             factor = func(*args, **kwargs)
             fail_count += 1
         wrapped.used.append(factor)
@@ -36,10 +35,15 @@ def dedup(func: Callable):
 def default_dym_var_sample_func(
     dym_var_dict: Dict[tvm.relax.expr.Call, str]
 ) -> Dict[tvm.relax.expr.Call, int]:
+    """
+    Default dynamic shape variable sample function. Sample a random value for each dynamic shape variable.
+
+    {n: "int32", m: "int32"} -> {n: 128, m: 64}
+    """
     results = {}
     for var in dym_var_dict:
         if dym_var_dict[var] == "int32" or "int64":
-            results[var] = 2 ** random.randint(2, 10)
+            results[var] = random.randint(2, 128)
         else:
             raise TypeError(
                 "Unsupported dynamic shape variable type: " + dym_var_dict[var]
@@ -48,25 +52,44 @@ def default_dym_var_sample_func(
 
 
 def val_value_str(sample: Dict[tvm.relax.expr.Call, int]) -> str:
+    """Convert a variable value sample to a string."""
     return ", ".join([f"{k}={v}" for k, v in sample.items()])
 
 
 def populuate_input_shape(
     input_infos: List[Tuple[tvm.relax.TensorStructInfo]],
-    dym_var_sample: Dict[tvm.relax.expr.Call, int],
+    dym_var_sample: Dict[Union[tvm.relax.expr.Call, str], int],
 ) -> List[Tuple[Tuple[int], str]]:
+    """
+    Populate input shapes with dynamic shape variable samples.
+
+    [..., Shape(1, n, 128) with dtype=int32, ...] ->
+    [..., ((1, 64, 128), "int32"), ...] if n=64
+
+    """
     results = []
     for input_info in input_infos:
         shape = []
         if isinstance(input_info, tvm.relax.struct_info.ShapeStructInfo):
             # scalar input
-            results.append((dym_var_sample[input_info.values[0]], "scalar"))
+            key = input_info.values[0]
+            val = (
+                dym_var_sample[key]
+                if key in dym_var_sample
+                else dym_var_sample[str(key)]
+            )
+            results.append((val, "scalar"))
         else:
             for dim in input_info.shape:
                 if isinstance(dim, tvm.tir.IntImm):
                     shape.append(dim.value)
                 else:
-                    shape.append(dym_var_sample[dim])
+                    val = (
+                        dym_var_sample[dim]
+                        if dim in dym_var_sample
+                        else dym_var_sample[str(dim)]
+                    )
+                    shape.append(val)
             results.append((tuple(shape), input_info.dtype))
     return results
 
@@ -74,50 +97,61 @@ def populuate_input_shape(
 class MLCBench:
     """Benchmarking PrimFuncs or IRModules with Dynamic Input Shapes."""
 
-    df: pd.DataFrame = pd.DataFrame(columns=COLUMNS)
+    df: pd.DataFrame = pd.DataFrame()
 
     @staticmethod
     def benchmark(
         mod_or_func: Union[PrimFunc, IRModule],
-        input_shape_gen_func: Callable[[], Tuple[int]],
-        target: str = "nvidia/nvidia-a10g",
-        dev: tvm.runtime.Device = tvm.cuda(),
-        number=1,
-        repeat=1,
+        args: List[tvm.relax.TensorStructInfo],
+        dym_var_sample: Dict[Union[tvm.relax.expr.Call, str], int],
+        target: Union[str, tvm.target.Target] = "llvm -num-cores=4",
+        dev: tvm.runtime.Device = tvm.cpu(),
+        number=10,
+        repeat=10,
     ) -> Tuple[List[Tuple[Tuple[int], str]], float, float]:
+        """Benchmark a PrimFunc or IRModule with dynamic input shapes."""
+        # produce IRModule and function name
         if isinstance(mod_or_func, PrimFunc):
-            func = mod_or_func
-            func = func.with_attr("global_symbol", "main")
-            mod = IRModule.from_expr(func)
-            global_symbol = "main"
+            mod = IRModule.from_expr(mod_or_func.with_attr("global_symbol", "main"))
+            func_name = "main"
         else:
             mod = mod_or_func
-            global_symbol = mod.get_global_vars()[0]
-        if isinstance(target, str):
-            target = tvm.target.Target(target)
-        input_infos = input_shape_gen_func()
+            # assume only one global function
+            (func_name,) = mod.get_global_vars()
+        # produce target
+        target = tvm.target.Target(target)
+        # populate input shapes
+        input_infos = populuate_input_shape(args, dym_var_sample)
+        # generate input tensors, including scalars
+        # scalars are appended to the end of the list due to parsing order
         input_tensors = []
         scalar_input_tensors = []
         for input_shape, input_dtype in input_infos:
             if input_dtype == "scalar":
+                # special case like [n], generate int value
                 assert isinstance(input_shape, int)
                 scalar_input_tensors.append(input_shape)
             else:
+                # normal case like [1, n, 128], generate random tensor
                 input_tensors.append(
                     tvm.nd.array(
                         generate_input_data(input_shape, input_dtype), device=dev
                     )
                 )
+        # append scalar input tensors
         input_tensors.extend(scalar_input_tensors)
+        # build locally
         rt_mod = tvm.build(mod, target=target)
+        # benchmark locally
         result = rt_mod.time_evaluator(
-            global_symbol, dev=dev, number=number, repeat=repeat
+            func_name, dev=dev, number=number, repeat=repeat
         )(*input_tensors)
+        # return input infos, median, std
         return input_infos, result.median, result.std
 
     @staticmethod
     def record(
-        **kwargs,
+        kwargs: Dict[str, Any],
     ):
         MLCBench.df = MLCBench.df._append(
             kwargs,
@@ -125,72 +159,27 @@ class MLCBench:
         )
 
     @staticmethod
-    def show():
-        print(MLCBench.df)
+    def show(sort_by: str = "WxTime(ms)"):
+        print(dataframe_sort_by(MLCBench.df, sort_by))
         print("\n")
 
     @staticmethod
     def clear():
-        MLCBench.df = pd.DataFrame(columns=COLUMNS)
-
-    @staticmethod
-    def sample_input_shape(
-        prim_funcs: Dict[tvm.ir.GlobalVar, List[Tuple[tvm.relax.expr.Call, str]]],
-        get_var_val_func: Callable[[tvm.relax.expr], int] = lambda x: random.randint(
-            1, 100
-        ),
-    ) -> Dict[tvm.ir.GlobalVar, List[Tuple[Tuple[int], str]]]:
-        rvs = {}
-        results = {}
-        for prim_func_gv in prim_funcs.items():
-            for func_args, _ in prim_funcs[prim_func_gv]:
-                for arg in func_args:
-                    if isinstance(arg, tvm.relax.ShapeStructInfo):
-                        for var in arg:
-                            rvs[var] = 0
-                    elif isinstance(arg, tvm.relax.struct_info.TensorStructInfo):
-                        for var in arg.shape:
-                            if not isinstance(var, tvm.tir.IntImm):
-                                rvs[var] = 0
-                    else:
-                        for sub_arg in arg.fields:
-                            for var in sub_arg.shape:
-                                if not isinstance(var, tvm.tir.IntImm):
-                                    rvs[var] = 0
-        for var in rvs:
-            rvs[var] = get_var_val_func()
-        for prim_func_gv in prim_funcs.items():
-            results[prim_func_gv] = []
-            for func_args, weight in prim_funcs[prim_func_gv]:
-                for arg in func_args:
-                    if isinstance(arg, tvm.relax.ShapeStructInfo):
-                        shape = []
-                        for var in arg:
-                            shape.append(rvs[var])
-                        results[prim_func_gv].appeend((tuple(shape), weight))
-                    elif isinstance(arg, tvm.relax.struct_info.TensorStructInfo):
-                        shape = []
-                        for var in arg.shape:
-                            shape.append(rvs[var])
-                        results[prim_func_gv].appeend((tuple(shape), weight))
-                    else:
-                        for sub_arg in arg.fields:
-                            shape = []
-                            for var in sub_arg.shape:
-                                if not isinstance(var, tvm.tir.IntImm):
-                                    shape.append(rvs[var])
+        MLCBench.df = pd.DataFrame()
 
     @staticmethod
     def benchmark_relax_func(
         mod: tvm.ir.IRModule,
         relax_func: Union[tvm.ir.GlobalVar, str] = None,
         sample_number: int = 2,
-        target: str = "nvidia/nvidia-a10g",
-        dev: tvm.runtime.Device = tvm.cuda(),
         dym_var_sample_func: Callable[
-            [Dict[tvm.relax.expr.Call, str]],
-            Dict[tvm.relax.expr.Call, int],
+            [Dict[Union[tvm.relax.expr.Call, str], str]],
+            Dict[Union[tvm.relax.expr.Call, str], int],
         ] = default_dym_var_sample_func,
+        target: Union[str, tvm.target.Target] = "llvm -num-cores=4",
+        dev: tvm.runtime.Device = tvm.cpu(),
+        number=10,
+        repeat=10,
     ):
         relax_funcs, dynamic_var_dict = extract_func_info(mod)
 
@@ -221,14 +210,15 @@ class MLCBench:
                     for args, weight in relax_funcs[relax_func][functor]:
                         input_infos, median, std = MLCBench.benchmark(
                             mod[functor],
-                            input_shape_gen_func=lambda: populuate_input_shape(
-                                args, dym_var_sample
-                            ),
+                            args,
+                            dym_var_sample,
                             target=target,
                             dev=dev,
+                            number=number,
+                            repeat=repeat,
                         )
                         MLCBench.record(
-                            **{
+                            {
                                 f"PrimFuncs in {get_func_name_from_gv(relax_func)}": get_func_name_from_gv(
                                     functor
                                 ),

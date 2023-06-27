@@ -4,30 +4,43 @@ import cloudpickle
 
 import tvm
 
-IMPORTS = """import pickle
+SKETCH = """import pickle
 
 import tvm
 from tvm import relax
 from tvm.script import tir as T
 
 from mlc_bench.benchmark import MLCBench
-"""
 
-MAIN = """if __name__ == "__main__":
+MODEL_NAME = "{model_name}"
+RELAX_FUNC_NAME = "{relax_func_name}"
+PRIM_FUNC_NAME = "{prim_func_name}"
+FUNC_HASH = {func_hash}
+WEIGHT = {weight}
+CAT = {category}
+SAMPLE_NUMBER = {sample_number}
+
+INPUT_SHAPE_GEN_FUNC = pickle.loads({func_dump})
+
+{func_script}
+
+if __name__ == "__main__":
     bench = MLCBench()
+    target = tvm.target.Target({target})
+    dev = {dev}
     for _ in range(SAMPLE_NUMBER):
         input_infos, median, std = bench.benchmark(
-            main, input_shape_gen_func, "llvm -num-cores=4", tvm.cpu()
+            main, args, dym_var_sample=, target=target, dev=dev, number=10, repeat=10
         )
         bench.record(
-            RELAX_FUNC_NAME,
-            PRIM_FUNC_NAME,
-            input_infos,
-            median,
-            std,
-            WEIGHT,
-            WEIGHT*median
-        )
+        **{
+            "PrimFunc": PRIM_FUNC_NAME,
+            "InputInfo": input_infos,
+            "Time(us)": median*1e6,
+            "Std(us)": std*1e6,
+            "Weight": weight,
+            "WxTime(ms)": weight*median*1e3,
+        })
     bench.show()
 """
 
@@ -116,52 +129,6 @@ def extract_func_info(
     return relax_func_dict, extract_dynamic_var(relax_func_dict)
 
 
-def get_shape_gen_func(func_args: List[Tuple[tvm.relax.expr.Call, str]]):
-    def produce_shape(shape: tvm.relax.expr.ShapeExpr, count: int) -> Tuple[int]:
-        produced = []
-        for var in shape:
-            if isinstance(var, tvm.tir.IntImm):
-                produced.append(var.value)
-            else:
-                produced.append(2 ** (count % 13))
-        return tuple(produced)
-
-    @counted
-    def input_shape_gen_func():
-        results = []
-        for arg in func_args:
-            if isinstance(arg, tvm.relax.ShapeStructInfo):
-                pass
-            elif isinstance(arg, tvm.relax.struct_info.TensorStructInfo):
-                results.append(
-                    (
-                        produce_shape(arg.shape, input_shape_gen_func.count),
-                        arg.dtype,
-                    )
-                )
-            else:
-                for sub_arg in arg.fields:
-                    results.append(
-                        (
-                            produce_shape(sub_arg.shape, input_shape_gen_func.count),
-                            sub_arg.dtype,
-                        )
-                    )
-
-        # work around wrong input order for integer input
-        for arg in func_args:
-            if isinstance(arg, tvm.relax.ShapeStructInfo):
-                results.append(
-                    (
-                        (),
-                        "int64",
-                    )
-                )
-        return results
-
-    return input_shape_gen_func
-
-
 def extract_prim_func(
     model_name: str,
     relax_func_name: str,
@@ -172,22 +139,37 @@ def extract_prim_func(
     file_path: str,
     category: int = -1,
     sample_number: int = 5,
+    target: Union[str, tvm.target.Target] = "llvm -num-cores=4",
 ):
+    target = tvm.target.Target(target)
+
+    if target.kind.name == "cuda":
+        dev = "tvm.cuda()"
+    elif target.kind.name == "llvm":
+        dev = "tvm.cpu()"
+    else:
+        raise NotImplementedError("Only support cuda and llvm target.")
+
     file = open(file_path, "w")
-    print(IMPORTS, file=file)
-    print(f'MODEL_NAME = "{model_name}"', file=file)
-    print(f'RELAX_FUNC_NAME = "{relax_func_name}"', file=file)
-    print(f'PRIM_FUNC_NAME = "{prim_func_name}"', file=file)
-    print(f"FUNC_HASH = {tvm.ir.structural_hash(func)}", file=file)
-    print(f"WEIGHT = {weight}", file=file)
-    print(f"CAT = {category}", file=file)
-    print(f"SAMPLE_NUMBER = {sample_number}\n", file=file)
+
     print(
-        f"input_shape_gen_func = pickle.loads({cloudpickle.dumps(get_shape_gen_func(func_args))})",
+        SKETCH.format(
+            **{
+                "model_name": model_name,
+                "relax_func_name": relax_func_name,
+                "prim_func_name": prim_func_name,
+                "func_hash": tvm.ir.structural_hash(func),
+                "weight": weight,
+                "category": category,
+                "sample_number": sample_number,
+                "func_dump": cloudpickle.dumps(get_shape_gen_func(func_args)),
+                "func_script": func.script(),
+                "target": tvm.target.Target(target),
+                "dev": dev,
+            }
+        ),
         file=file,
     )
-    print(func.script() + "\n", file=file)
-    print(MAIN, file=file)
 
 
 def get_func_name_from_gv(gv: tvm.ir.GlobalVar) -> str:
